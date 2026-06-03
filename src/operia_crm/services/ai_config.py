@@ -21,7 +21,7 @@ Inclua, quando possível:
 
 O operador humano sempre revisa, confirma e executa a ação.'''
 
-PROVIDER_OPTIONS = ("Ollama", "Gemini", "Cloudflare", "Outro")
+PROVIDER_OPTIONS = ("Ollama", "Gemini", "Cloudflare", "Vultr", "Outro")
 PROVIDER_TYPES = ("local", "api")
 
 AI_SCHEMA = '''
