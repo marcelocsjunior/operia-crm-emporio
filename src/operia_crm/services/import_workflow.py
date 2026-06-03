@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from operia_crm.services.core import dedupe_row, import_table, normalize_phone, normalize_text
+from operia_crm.services.emporio_mode import (
+    EMPORIO_DISPLAY_COLUMNS,
+    EMPORIO_IMPORT_ALIASES,
+    parse_emporio_import_fields,
+)
 
 DEFAULT_IMPORT_INBOX_DIR = Path(os.getenv('OPERIA_IMPORT_INBOX_DIR', 'imports/inbox'))
 SERVER_INBOX_SOURCE = 'server_inbox'
@@ -24,6 +29,7 @@ COLUMN_ALIASES = {
     'status': 'status',
     'notes': 'notes', 'observacoes': 'notes', 'observações': 'notes',
 }
+COLUMN_ALIASES.update(EMPORIO_IMPORT_ALIASES)
 
 DISPLAY_COLUMNS = {
     'name': 'Nome',
@@ -37,6 +43,7 @@ DISPLAY_COLUMNS = {
     'status': 'Status',
     'notes': 'Observações',
 }
+DISPLAY_COLUMNS.update(EMPORIO_DISPLAY_COLUMNS)
 
 
 def file_sha256(content: bytes) -> str:
@@ -198,6 +205,7 @@ def analyze_import_dataframe(df, existing: list[dict]) -> dict[str, Any]:
             phone = _clean_cell(canonical.get('phone'))
             whatsapp = _clean_cell(canonical.get('whatsapp'))
             email = _clean_cell(canonical.get('email'))
+            emporio_fields = parse_emporio_import_fields(raw_row)
 
             if not name:
                 dedupe = 'não avaliado'
@@ -257,6 +265,14 @@ def analyze_import_dataframe(df, existing: list[dict]) -> dict[str, Any]:
                 'motivo': reason,
                 'acao_prevista': action,
                 'reason_key': reason_key,
+                'tipo_oportunidade': emporio_fields.get('opportunity_type') or '',
+                'data_evento_ou_entrega': emporio_fields.get('event_or_delivery_date') or '',
+                'valor_estimado': emporio_fields.get('estimated_value') or '',
+                'quantidade_pessoas': emporio_fields.get('people_count') or '',
+                'canal_origem': emporio_fields.get('source_channel') or '',
+                'status_emporio': emporio_fields.get('emporio_status') or '',
+                'proxima_acao': emporio_fields.get('next_action') or '',
+                'observacao_operacional': emporio_fields.get('operational_notes') or '',
             })
         except Exception as exc:  # noqa: BLE001
             rows.append({

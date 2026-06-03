@@ -10,6 +10,13 @@ from pathlib import Path
 
 from operia_crm.config.settings import settings
 from operia_crm.database.db import get_conn
+from operia_crm.services.emporio_mode import (
+    calculate_emporio_priority,
+    normalize_emporio_status,
+    normalize_opportunity_type,
+    parse_emporio_date,
+    parse_emporio_import_fields,
+)
 
 ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg'}
 
@@ -77,19 +84,39 @@ def calculate_score(lead: dict) -> int:
         score += 10
     if lead.get('next_followup'):
         score += 10
+    emporio = calculate_emporio_priority(lead)
+    if emporio["priority"] == "Alta":
+        score += 20
+    elif emporio["priority"] == "Média":
+        score += 10
     return max(0, min(100, score))
 
 
 def create_lead(payload: dict) -> int:
+    payload = dict(payload)
+    if payload.get("opportunity_type"):
+        payload["opportunity_type"] = normalize_opportunity_type(payload.get("opportunity_type"))
+    if payload.get("emporio_status"):
+        payload["emporio_status"] = normalize_emporio_status(payload.get("emporio_status"))
+    if payload.get("event_or_delivery_date"):
+        event_date = parse_emporio_date(payload.get("event_or_delivery_date"))
+        payload["event_or_delivery_date"] = event_date.isoformat() if event_date else None
     payload['score'] = calculate_score(payload)
     with get_conn() as conn:
         cur = conn.execute(
-            '''INSERT INTO leads (name,company,phone,whatsapp,email,city,segment,origin,status,score,next_followup,notes)
-                              VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+            '''INSERT INTO leads (
+                   name,company,phone,whatsapp,email,city,segment,origin,status,score,next_followup,notes,
+                   opportunity_type,event_or_delivery_date,estimated_value,people_count,source_channel,
+                   emporio_status,next_action,operational_notes
+               )
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (
                 payload['name'], payload.get('company'), payload.get('phone'), payload.get('whatsapp'), payload.get('email'),
                 payload.get('city'), payload.get('segment'), payload['origin'], payload['status'], payload['score'],
                 payload.get('next_followup'), payload.get('notes'),
+                payload.get('opportunity_type'), payload.get('event_or_delivery_date'), payload.get('estimated_value'),
+                payload.get('people_count'), payload.get('source_channel'), payload.get('emporio_status'),
+                payload.get('next_action'), payload.get('operational_notes'),
             ),
         )
         lead_id = cur.lastrowid
@@ -182,6 +209,24 @@ def import_deduped_leads(df, existing: list[dict]) -> dict:
         'status': 'status',
         'notes': 'notes', 'observacoes': 'notes', 'observações': 'notes',
     }
+    alias.update({
+        'tipo_oportunidade': 'opportunity_type',
+        'opportunity_type': 'opportunity_type',
+        'data_evento_ou_entrega': 'event_or_delivery_date',
+        'event_or_delivery_date': 'event_or_delivery_date',
+        'valor_estimado': 'estimated_value',
+        'estimated_value': 'estimated_value',
+        'quantidade_pessoas': 'people_count',
+        'people_count': 'people_count',
+        'canal_origem': 'source_channel',
+        'source_channel': 'source_channel',
+        'status_emporio': 'emporio_status',
+        'emporio_status': 'emporio_status',
+        'proxima_acao': 'next_action',
+        'next_action': 'next_action',
+        'observacao_operacional': 'operational_notes',
+        'operational_notes': 'operational_notes',
+    })
     summary = {'total_linhas': len(df), 'importados': 0, 'ignorados_duplicidade': 0, 'ignorados_sem_nome': 0, 'ignorados_sem_contato': 0, 'erros': 0}
 
     for _, row in df.iterrows():
@@ -196,6 +241,7 @@ def import_deduped_leads(df, existing: list[dict]) -> dict:
             mapped = alias.get(k)
             if mapped:
                 payload[mapped] = _clean_import_value(v)
+        payload.update(parse_emporio_import_fields(row_dict))
 
         if not payload.get('name'):
             summary['ignorados_sem_nome'] += 1

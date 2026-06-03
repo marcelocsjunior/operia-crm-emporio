@@ -18,6 +18,14 @@ CREATE TABLE IF NOT EXISTS leads (
     next_followup TEXT,
     notes TEXT,
     is_client INTEGER NOT NULL DEFAULT 0,
+    opportunity_type TEXT,
+    event_or_delivery_date TEXT,
+    estimated_value REAL,
+    people_count INTEGER,
+    source_channel TEXT,
+    emporio_status TEXT,
+    next_action TEXT,
+    operational_notes TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS interactions (
@@ -63,10 +71,29 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 '''
 
+EMPORIO_LEAD_COLUMNS = {
+    "opportunity_type": "TEXT",
+    "event_or_delivery_date": "TEXT",
+    "estimated_value": "REAL",
+    "people_count": "INTEGER",
+    "source_channel": "TEXT",
+    "emporio_status": "TEXT",
+    "next_action": "TEXT",
+    "operational_notes": "TEXT",
+}
+
+
+def ensure_emporio_schema(conn) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
+    for column, column_type in EMPORIO_LEAD_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {column_type}")
+
 def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(settings.db_path) as conn:
         conn.executescript(SCHEMA)
+        ensure_emporio_schema(conn)
 
 @contextmanager
 def get_conn():

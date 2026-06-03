@@ -30,6 +30,7 @@ from operia_crm.services.commercial_workflow import (
     build_leads_operational_view,
 )
 from operia_crm.services.core import *
+from operia_crm.services.emporio_mode import EMPORIO_STATUSES, OPPORTUNITY_TYPES, suggest_emporio_message
 from operia_crm.services.import_workflow import (
     SERVER_INBOX_SOURCE,
     UPLOAD_BROWSER_SOURCE,
@@ -385,6 +386,8 @@ def commercial_action_card(action: dict) -> None:
 
 
 def commercial_temperature(item: dict) -> str:
+    if item.get("_emporio_temperature"):
+        return str(item.get("_emporio_temperature"))
     score = safe_int(item.get("_score") or item.get("score"))
     status = str(item.get("_stage") or item.get("status") or item.get("status_context") or "").lower()
     has_open_proposal = bool(item.get("_has_open_proposal") or item.get("has_open_proposal"))
@@ -458,9 +461,11 @@ def batch_option_label(item: dict, action: dict) -> str:
 
 
 def suggested_email_text(item: dict, action: dict) -> str:
+    emporio_message = suggest_emporio_message(item)
     return (
-        f"Assunto: Próximos passos\n\nOlá, {item.get('name') or 'tudo bem'}.\n\n"
-        f"{action.get('prepared_content') or 'Podemos alinhar o próximo passo comercial?'}"
+        f"Assunto: Próximos passos Empório\n\n"
+        f"{emporio_message}\n\n"
+        f"{action.get('prepared_content') or 'Podemos alinhar o próximo passo operacional?'}"
     )
 
 
@@ -654,8 +659,11 @@ def opportunity_table_rows(items: list[dict]) -> list[dict]:
             {
                 "Contato": item.get("name") or "Contato",
                 "Temperatura": commercial_temperature(item),
-                "Score": safe_int(item.get("_score") or item.get("score")),
+                "Prioridade": item.get("_emporio_priority") or "Média",
                 "Status": item.get("_stage") or item.get("status") or "Em análise",
+                "Tipo": item.get("_opportunity_type") or item.get("opportunity_type") or "-",
+                "Data": item.get("event_or_delivery_date") or "-",
+                "Valor estimado": item.get("estimated_value") or 0,
                 "Canal": contact_channel(item),
             }
         )
@@ -668,6 +676,9 @@ def render_opportunity_card(item: dict, action: dict) -> None:
     score = safe_int(item.get("_score") or item.get("score"))
     status = escape(str(item.get("_stage") or item.get("status") or "Em análise"))
     channel = escape(contact_channel(item))
+    opportunity_type = escape(str(item.get("_opportunity_type") or item.get("opportunity_type") or "-"))
+    event_date = escape(str(item.get("event_or_delivery_date") or "-"))
+    estimated_value = escape(str(item.get("estimated_value") or 0))
     reason = escape(str(action.get("reason") or item.get("_duplicate_risk") or "Prioridade comercial identificada na carteira."))
     recommendation = escape(str(action.get("title") or action.get("prepared_content") or "Revisar oportunidade e definir próximo passo."))
     st.markdown(
@@ -676,9 +687,12 @@ def render_opportunity_card(item: dict, action: dict) -> None:
           <div class="commercial-action-contact">{name}</div>
           <div class="commercial-opportunity-grid">
             <div class="commercial-mini-stat"><div class="commercial-mini-label">Temperatura</div><div class="commercial-mini-value">{temperature}</div></div>
-            <div class="commercial-mini-stat"><div class="commercial-mini-label">Score</div><div class="commercial-mini-value">{score}</div></div>
+            <div class="commercial-mini-stat"><div class="commercial-mini-label">Prioridade</div><div class="commercial-mini-value">{escape(str(item.get("_emporio_priority") or score))}</div></div>
             <div class="commercial-mini-stat"><div class="commercial-mini-label">Status</div><div class="commercial-mini-value">{status}</div></div>
             <div class="commercial-mini-stat"><div class="commercial-mini-label">Contato/canal</div><div class="commercial-mini-value">{channel}</div></div>
+            <div class="commercial-mini-stat"><div class="commercial-mini-label">Tipo</div><div class="commercial-mini-value">{opportunity_type}</div></div>
+            <div class="commercial-mini-stat"><div class="commercial-mini-label">Data</div><div class="commercial-mini-value">{event_date}</div></div>
+            <div class="commercial-mini-stat"><div class="commercial-mini-label">Valor estimado</div><div class="commercial-mini-value">{estimated_value}</div></div>
           </div>
           <div class="commercial-action-reason">Motivo: {reason}</div>
           <div class="commercial-action-impact">Ação recomendada: {recommendation}</div>
@@ -690,7 +704,7 @@ def render_opportunity_card(item: dict, action: dict) -> None:
 
 def render_funnel(snapshot: dict) -> None:
     funnel = snapshot.get("funnel") or {}
-    stages = ["Novos contatos", "Contato iniciado", "Proposta enviada", "Em negociação", "Fechados"]
+    stages = EMPORIO_STATUSES
     max_count = max([safe_int(funnel.get(stage)) for stage in stages] + [1])
     for stage in stages:
         count = safe_int(funnel.get(stage))
@@ -740,12 +754,12 @@ with tab1:
         """
         <div class="commercial-panel-heading">
           <h2 class="commercial-panel-title">🧠 OperIA CRM — Empório</h2>
-          <div class="commercial-panel-subtitle">Tela principal inteligente: a IA prioriza a carteira; o operador revisa antes de qualquer ação.</div>
+          <div class="commercial-panel-subtitle">Modo operacional para restaurante: retornos, eventos, encomendas, reservas e atendimento corporativo com revisão humana.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    commercial_badges(["Top 5 automático", "Temperatura comercial", "Funil com gargalos", "IA com revisão"])
+    commercial_badges(["Retornos de hoje", "Eventos próximos", "Proposta/cardápio", "IA com revisão"])
 
     if "commercial_panel_package" not in st.session_state:
         snapshot = build_commercial_panel_snapshot()
@@ -766,25 +780,35 @@ with tab1:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        commercial_kpi_card("Fila ativa", int(snapshot.get("total_contatos") or 0))
+        commercial_kpi_card("Oportunidades abertas", int(snapshot.get("total_contatos") or 0) - int(snapshot.get("contatos_fechados") or 0))
     with c2:
-        commercial_kpi_card("Oportunidades em alta", int(snapshot.get("oportunidades_em_alta") or 0))
+        commercial_kpi_card("Retornos pendentes", int(snapshot.get("retornos_a_fazer") or 0))
     with c3:
-        commercial_kpi_card("Retornos a fazer", int(snapshot.get("retornos_a_fazer") or 0))
+        commercial_kpi_card("Eventos/entregas próximos", int(snapshot.get("eventos_entregas_proximos") or 0))
     with c4:
-        commercial_kpi_card("Propostas em aberto", int(snapshot.get("propostas_em_aberto") or 0))
+        commercial_kpi_card("Propostas/cardápios aguardando retorno", int(snapshot.get("propostas_cardapios_aguardando_retorno") or 0))
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        commercial_kpi_card("Valor estimado em aberto", int(float(snapshot.get("valor_estimado_em_aberto") or 0)))
+    with c6:
+        commercial_kpi_card("Oportunidades em alta", int(snapshot.get("oportunidades_em_alta") or 0))
+    with c7:
+        commercial_kpi_card("Contatos parados", int(snapshot.get("contatos_sem_proxima_acao") or 0))
+    with c8:
+        commercial_kpi_card("Cadastros incompletos", int(snapshot.get("contatos_incompletos") or 0))
 
     if int(snapshot.get("contatos_com_risco_duplicidade") or 0) > 0:
         commercial_alert("Existem possíveis duplicidades. Revise antes de liberar novas ações comerciais.")
 
-    commercial_section_title("IA prepara, operador libera")
+    commercial_section_title("O que o operador deve fazer agora")
     st.write(package.get("main_action") or "Cadastre ou importe contatos para iniciar a análise comercial.")
     st.caption("Nada é enviado ou registrado antes da revisão humana.")
 
-    panel_top5_tab, panel_funnel_tab, panel_review_tab = st.tabs(["Top 5", "Funil", "Modo IA com revisão"])
+    panel_top5_tab, panel_funnel_tab, panel_review_tab = st.tabs(["Fila operacional", "Funil Empório", "Modo IA com revisão"])
 
     with panel_top5_tab:
-        batch_size = st.number_input("Tamanho do lote IA", min_value=1, max_value=50, value=5, step=1)
+        st.caption("Responde: quem precisa de retorno hoje, quem aguarda proposta/cardápio, quais eventos estão próximos e o que fazer agora.")
+        batch_size = st.number_input("Tamanho do lote operacional", min_value=1, max_value=50, value=5, step=1)
         opportunities = prioritized_opportunities(snapshot, package, limit=safe_int(batch_size))
         if opportunities:
             st.dataframe(opportunity_table_rows(opportunities), use_container_width=True, hide_index=True)
@@ -807,13 +831,13 @@ with tab1:
             suggested_message = selected_action.get("suggested_message") or "Mensagem sugerida ainda não preparada. Revise a oportunidade antes de abordar."
             suggested_email = suggested_email_text(selected, selected_action)
             whatsapp_message = st.text_area(
-                "Mensagem WhatsApp sugerida",
+                "Mensagem WhatsApp sugerida para o Empório",
                 value=suggested_message,
                 height=120,
                 key=f"panel_whatsapp_review_{safe_int(selected.get('_lead_id'))}_{package_signature}",
             )
             email_message = st.text_area(
-                "E-mail sugerido",
+                "E-mail sugerido para o Empório",
                 value=suggested_email,
                 height=150,
                 key=f"panel_email_review_{safe_int(selected.get('_lead_id'))}_{package_signature}",
@@ -828,7 +852,7 @@ with tab1:
             st.info("Carteira vazia ou sem oportunidade priorizada no momento.")
 
     with panel_funnel_tab:
-        commercial_section_title("Funil comercial")
+        commercial_section_title("Funil operacional Empório")
         render_funnel(snapshot)
 
     with panel_review_tab:
@@ -878,17 +902,40 @@ with tab1:
                 st.success("Inicialização idempotente concluída.")
 
 with tab2:
-    st.subheader("Carteira comercial inteligente")
+    st.subheader("Carteira operacional Empório")
     with st.form("lead_form"):
         name = st.text_input("Nome*")
         email = st.text_input("E-mail")
         phone = st.text_input("Telefone")
         status = st.selectbox("Status", ["Novo lead", "Qualificar", "Contato iniciado", "Proposta enviada", "Negociação", "Ganho", "Perdido", "Follow-up futuro"])
+        opportunity_type = st.selectbox("Tipo de oportunidade", OPPORTUNITY_TYPES)
+        event_or_delivery_date = st.date_input("Data do evento/entrega/reserva", value=None)
+        estimated_value = st.number_input("Valor estimado", min_value=0.0, value=0.0, step=50.0)
+        people_count = st.number_input("Quantidade de pessoas", min_value=0, value=0, step=1)
+        source_channel = st.selectbox("Canal de origem", ["WhatsApp", "Instagram", "Telefone", "Indicação", "Site", "Google", "Presencial", "Cliente antigo", "Outro"])
+        emporio_status = st.selectbox("Status Empório", EMPORIO_STATUSES)
+        next_action = st.text_input("Próxima ação")
+        operational_notes = st.text_area("Observação operacional")
         origin = st.selectbox("Origem", ["Indicação", "WhatsApp", "Instagram", "Site", "Google", "Prospecção ativa", "Evento", "Cliente antigo", "Parceria", "Outro"])
         next_followup = st.date_input("Próximo follow-up", value=None)
         if st.form_submit_button("Salvar") and name:
-            create_lead({"name": name, "email": email, "phone": phone, "status": status, "origin": origin, "next_followup": str(next_followup) if next_followup else None})
-            st.success("Lead salvo")
+            create_lead({
+                "name": name,
+                "email": email,
+                "phone": phone,
+                "status": status,
+                "origin": origin,
+                "next_followup": str(next_followup) if next_followup else None,
+                "opportunity_type": opportunity_type,
+                "event_or_delivery_date": str(event_or_delivery_date) if event_or_delivery_date else None,
+                "estimated_value": estimated_value,
+                "people_count": people_count,
+                "source_channel": source_channel,
+                "emporio_status": emporio_status,
+                "next_action": next_action,
+                "operational_notes": operational_notes,
+            })
+            st.success("Oportunidade Empório salva")
 
     operational_rows = build_leads_operational_view()
     display_rows = [{k: v for k, v in row.items() if not k.startswith("_")} for row in operational_rows[:50]]
