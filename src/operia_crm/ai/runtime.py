@@ -10,6 +10,7 @@ from operia_crm.services.ai_config import get_ai_settings, list_ai_models
 
 LOCAL_TIMEOUT_SECONDS = 3
 EXTERNAL_TIMEOUT_SECONDS = 30
+VULTR_SYSTEM_PROMPT = "Você é um assistente comercial do OperIA CRM Empório. Responda em português brasileiro, com objetividade comercial e sem expor detalhes técnicos."
 
 
 def build_context(action: str, lead: dict[str, Any] | None = None, interactions: list[dict[str, Any]] | None = None, proposal_content: str | None = None) -> str:
@@ -97,7 +98,10 @@ def _call_vultr(model: dict[str, Any], prompt: str) -> str:
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": VULTR_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
         "temperature": 0.3,
         "stream": False,
     }

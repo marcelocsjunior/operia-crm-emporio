@@ -114,7 +114,7 @@ def test_vultr_payload_headers_and_response_mock(monkeypatch):
 
     monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "fake-vultr-key")
     monkeypatch.setattr("operia_crm.ai.runtime.request.urlopen", fake_urlopen)
-    from operia_crm.ai.runtime import EXTERNAL_TIMEOUT_SECONDS, _call_vultr
+    from operia_crm.ai.runtime import EXTERNAL_TIMEOUT_SECONDS, VULTR_SYSTEM_PROMPT, _call_vultr
 
     out = _call_vultr(
         {
@@ -130,7 +130,10 @@ def test_vultr_payload_headers_and_response_mock(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer fake-vultr-key"
     assert captured["headers"]["Content-type"] == "application/json"
     assert captured["json"]["model"] == "vultr-chat"
-    assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["json"]["messages"] == [
+        {"role": "system", "content": VULTR_SYSTEM_PROMPT},
+        {"role": "user", "content": "hello"},
+    ]
     assert captured["json"]["temperature"] == 0.3
     assert captured["json"]["stream"] is False
     assert captured["timeout"] == EXTERNAL_TIMEOUT_SECONDS
