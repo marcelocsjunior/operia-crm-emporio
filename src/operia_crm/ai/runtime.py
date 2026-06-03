@@ -8,7 +8,8 @@ from urllib import request, error
 
 from operia_crm.services.ai_config import get_ai_settings, list_ai_models
 
-TIMEOUT_SECONDS = 3
+LOCAL_TIMEOUT_SECONDS = 3
+EXTERNAL_TIMEOUT_SECONDS = 30
 
 
 def build_context(action: str, lead: dict[str, Any] | None = None, interactions: list[dict[str, Any]] | None = None, proposal_content: str | None = None) -> str:
@@ -50,7 +51,7 @@ def _call_ollama(model: dict[str, Any], prompt: str) -> str:
     url = f"{(model.get('base_url') or 'http://localhost:11434').rstrip('/')}/api/generate"
     payload = {"model": model.get("model_name"), "prompt": prompt, "stream": False}
     req = request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with request.urlopen(req, timeout=TIMEOUT_SECONDS) as res:
+    with request.urlopen(req, timeout=LOCAL_TIMEOUT_SECONDS) as res:
         data = json.loads(res.read().decode())
     return data.get("response", "").strip()
 
@@ -63,7 +64,7 @@ def _call_gemini(model: dict[str, Any], prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model.get('model_name')}:generateContent?key={key}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     req = request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with request.urlopen(req, timeout=TIMEOUT_SECONDS) as res:
+    with request.urlopen(req, timeout=EXTERNAL_TIMEOUT_SECONDS) as res:
         data = json.loads(res.read().decode())
     return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
 
@@ -77,9 +78,43 @@ def _call_cloudflare(model: dict[str, Any], prompt: str) -> str:
     if not token:
         raise RuntimeError("Cloudflare sem token configurado")
     req = request.Request(base_url, data=json.dumps({"prompt": prompt}).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-    with request.urlopen(req, timeout=TIMEOUT_SECONDS) as res:
+    with request.urlopen(req, timeout=EXTERNAL_TIMEOUT_SECONDS) as res:
         data = json.loads(res.read().decode())
     return (data.get("result") or {}).get("response", "").strip()
+
+
+def _call_vultr(model: dict[str, Any], prompt: str) -> str:
+    base_url = (model.get("base_url") or "").strip()
+    provider_ref = (model.get("provider_ref") or "").strip()
+    model_name = (model.get("model_name") or "").strip()
+    if not base_url:
+        raise RuntimeError("Vultr requer base_url")
+    if not provider_ref or not os.getenv(provider_ref, ""):
+        raise RuntimeError("Vultr sem chave configurada")
+    if not model_name:
+        raise RuntimeError("Nome do modelo não configurado")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "stream": False,
+    }
+    req = request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {os.getenv(provider_ref, '')}",
+            "Content-Type": "application/json",
+        },
+    )
+    with request.urlopen(req, timeout=EXTERNAL_TIMEOUT_SECONDS) as res:
+        data = json.loads(res.read().decode())
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    if not content:
+        raise RuntimeError("Resposta vazia do Vultr")
+    return content
 
 
 def _fallback(action: str, lead: dict[str, Any] | None) -> str:
@@ -121,6 +156,8 @@ def run_assisted_action(action: str, lead: dict[str, Any] | None = None, interac
                 content = _call_gemini(model, prompt)
             elif provider == "cloudflare":
                 content = _call_cloudflare(model, prompt)
+            elif provider == "vultr":
+                content = _call_vultr(model, prompt)
             else:
                 continue
             if content:

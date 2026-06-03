@@ -2,6 +2,7 @@ import os
 
 from operia_crm.ai.assistant import suggest_message
 from operia_crm.ai.runtime import build_context, run_assisted_action
+from operia_crm.services.ai_config import PROVIDER_OPTIONS
 
 
 def test_fallback_without_active_provider(monkeypatch):
@@ -76,3 +77,160 @@ def test_context_builder():
 def test_suggest_message_compatibility():
     msg = suggest_message("Maria", "vi sua solicitação")
     assert "Maria" in msg
+
+
+def test_provider_options_include_vultr_and_preserve_existing_providers():
+    assert PROVIDER_OPTIONS == ("Ollama", "Gemini", "Cloudflare", "Vultr", "Outro")
+
+
+def test_vultr_provider_recognized(monkeypatch):
+    models = [{"provider_name": "Vultr", "model_name": "vultr-model", "priority": 1}]
+    monkeypatch.setattr("operia_crm.ai.runtime.list_ai_models", lambda active=True: models)
+    monkeypatch.setattr("operia_crm.ai.runtime._call_vultr", lambda model, prompt: "vultr ok")
+
+    res = run_assisted_action("proxima_acao", lead={"name": "A"})
+
+    assert res["used_fallback"] is False
+    assert res["provider_name"] == "Vultr"
+    assert res["content"] == "vultr ok"
+
+
+def test_vultr_payload_headers_and_response_mock(monkeypatch):
+    captured = {}
+
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return b"{\"choices\": [{\"message\": {\"content\": \"vultr response\"}}]}"
+
+    def fake_urlopen(req, timeout):
+        import json as _json
+        captured["url"] = req.full_url
+        captured["json"] = _json.loads(req.data.decode())
+        captured["headers"] = dict(req.header_items())
+        captured["timeout"] = timeout
+        return R()
+
+    monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "fake-vultr-key")
+    monkeypatch.setattr("operia_crm.ai.runtime.request.urlopen", fake_urlopen)
+    from operia_crm.ai.runtime import EXTERNAL_TIMEOUT_SECONDS, _call_vultr
+
+    out = _call_vultr(
+        {
+            "base_url": "https://api.vultrinference.com/v1/",
+            "model_name": "vultr-chat",
+            "provider_ref": "VULTR_INFERENCE_API_KEY",
+        },
+        "hello",
+    )
+
+    assert out == "vultr response"
+    assert captured["url"] == "https://api.vultrinference.com/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer fake-vultr-key"
+    assert captured["headers"]["Content-type"] == "application/json"
+    assert captured["json"]["model"] == "vultr-chat"
+    assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["json"]["temperature"] == 0.3
+    assert captured["json"]["stream"] is False
+    assert captured["timeout"] == EXTERNAL_TIMEOUT_SECONDS
+
+
+def test_vultr_missing_key_controlled_error(monkeypatch):
+    monkeypatch.delenv("VULTR_INFERENCE_API_KEY", raising=False)
+    from operia_crm.ai.runtime import _call_vultr
+
+    try:
+        _call_vultr(
+            {
+                "base_url": "https://api.vultrinference.com/v1",
+                "model_name": "vultr-chat",
+                "provider_ref": "VULTR_INFERENCE_API_KEY",
+            },
+            "hello",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Vultr sem chave configurada"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_vultr_missing_base_url_controlled_error(monkeypatch):
+    monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "fake-vultr-key")
+    from operia_crm.ai.runtime import _call_vultr
+
+    try:
+        _call_vultr(
+            {"base_url": "", "model_name": "vultr-chat", "provider_ref": "VULTR_INFERENCE_API_KEY"},
+            "hello",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Vultr requer base_url"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_vultr_missing_model_name_controlled_error(monkeypatch):
+    monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "fake-vultr-key")
+    from operia_crm.ai.runtime import _call_vultr
+
+    try:
+        _call_vultr(
+            {
+                "base_url": "https://api.vultrinference.com/v1",
+                "model_name": "",
+                "provider_ref": "VULTR_INFERENCE_API_KEY",
+            },
+            "hello",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Nome do modelo não configurado"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_vultr_empty_response_controlled_error(monkeypatch):
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return b"{\"choices\": [{\"message\": {\"content\": \"\"}}]}"
+
+    monkeypatch.setenv("VULTR_INFERENCE_API_KEY", "fake-vultr-key")
+    monkeypatch.setattr("operia_crm.ai.runtime.request.urlopen", lambda req, timeout: R())
+    from operia_crm.ai.runtime import _call_vultr
+
+    try:
+        _call_vultr(
+            {
+                "base_url": "https://api.vultrinference.com/v1",
+                "model_name": "vultr-chat",
+                "provider_ref": "VULTR_INFERENCE_API_KEY",
+            },
+            "hello",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Resposta vazia do Vultr"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_vultr_failure_uses_local_fallback(monkeypatch):
+    models = [
+        {
+            "provider_name": "Vultr",
+            "model_name": "vultr-chat",
+            "priority": 1,
+            "base_url": "https://api.vultrinference.com/v1",
+            "provider_ref": "VULTR_INFERENCE_API_KEY",
+        }
+    ]
+    monkeypatch.setattr("operia_crm.ai.runtime.list_ai_models", lambda active=True: models)
+    monkeypatch.setattr("operia_crm.ai.runtime._call_vultr", lambda model, prompt: (_ for _ in ()).throw(RuntimeError("Vultr sem chave configurada")))
+
+    res = run_assisted_action("email", lead={"name": "A"})
+
+    assert res["used_fallback"] is True
+    assert res["provider_name"] == "fallback_local"
+    assert res["content"]
+    assert "Vultr sem chave configurada" in (res["error"] or "")
