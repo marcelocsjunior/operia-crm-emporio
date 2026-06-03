@@ -8,15 +8,18 @@ from typing import Any
 
 from operia_crm.database.db import get_conn
 from operia_crm.services.core import list_leads, register_interaction
+from operia_crm.services.emporio_mode import (
+    EMPORIO_STATUSES,
+    calculate_emporio_priority,
+    normalize_emporio_status,
+    normalize_opportunity_type,
+    suggest_emporio_message,
+)
 
 MAX_WORK_ACTIONS = 5
 ACTION_MARKER_PREFIX = "[operia-work-action:"
 FUNNEL_STAGES = [
-    "Novos contatos",
-    "Contato iniciado",
-    "Proposta enviada",
-    "Em negociação",
-    "Fechados",
+    *EMPORIO_STATUSES,
 ]
 
 CLOSED_MARKERS = ("ganho", "ganha", "fechado", "fechada", "perdido", "perdida", "cancelado", "cancelada")
@@ -141,14 +144,14 @@ def _duplicate_groups(leads: list[dict[str, Any]]) -> dict[int, str]:
 
 def _lead_stage(status: str, has_open_proposal: bool, is_closed: bool, is_negotiation: bool, has_proposal_status: bool) -> str:
     if is_closed:
-        return "Fechados"
+        return "Confirmado / fechado" if "ganh" in status or "fechad" in status else "Perdido"
     if is_negotiation:
-        return "Em negociação"
+        return "Aguardando retorno"
     if has_open_proposal or has_proposal_status:
-        return "Proposta enviada"
+        return "Proposta/cardápio enviado"
     if _has_any(status, NEW_MARKERS):
-        return "Novos contatos"
-    return "Contato iniciado"
+        return "Novo contato"
+    return "Qualificar demanda"
 
 
 def _build_lead_facts(
@@ -170,8 +173,11 @@ def _build_lead_facts(
         pending_count = pending_by_lead.get(lead_id, 0)
         next_followup = lead.get("next_followup")
         stage = _lead_stage(status, has_open_proposal, is_closed, is_negotiation, has_proposal_status)
+        emporio_status = normalize_emporio_status(lead.get("emporio_status") or stage)
+        stage = emporio_status
+        emporio_priority = calculate_emporio_priority({**lead, "emporio_status": emporio_status})
         is_high_opportunity = bool(not is_closed and (has_open_proposal or is_negotiation or score >= 70))
-        has_next_action = bool(has_open_proposal or pending_count > 0 or next_followup)
+        has_next_action = bool(has_open_proposal or pending_count > 0 or next_followup or _text(lead.get("next_action")))
         duplicate_risk = duplicate_by_id.get(lead_id, "")
 
         fact = dict(lead)
@@ -179,18 +185,24 @@ def _build_lead_facts(
             {
                 "_lead_id": lead_id,
                 "_score": score,
+                "_emporio_score": emporio_priority["score"],
+                "_emporio_priority": emporio_priority["priority"],
+                "_emporio_temperature": emporio_priority["temperature"],
+                "_emporio_reasons": emporio_priority["reasons"],
+                "_days_until_event": emporio_priority["days_until_event"],
+                "_opportunity_type": normalize_opportunity_type(lead.get("opportunity_type")),
                 "_stage": stage,
                 "_has_open_proposal": has_open_proposal,
                 "_open_proposals_count": len(open_proposals.get(lead_id, [])),
                 "_pending_interactions_count": pending_count,
                 "_has_next_followup": bool(next_followup),
                 "_has_next_action": has_next_action,
-                "_needs_return": bool(not is_closed and has_next_action),
-                "_is_high_opportunity": is_high_opportunity,
+                "_needs_return": bool(not is_closed and (has_next_action or stage in {"Aguardando retorno", "Proposta/cardápio enviado"})),
+                "_is_high_opportunity": bool(is_high_opportunity or emporio_priority["priority"] == "Alta"),
                 "_is_closed": is_closed,
                 "_is_negotiation": is_negotiation,
                 "_has_proposal_status": has_proposal_status,
-                "_is_new": stage == "Novos contatos",
+                "_is_new": stage == "Novo contato",
                 "_has_contact": _has_contact(lead),
                 "_is_incomplete": not _has_required_context(lead),
                 "_duplicate_risk": duplicate_risk,
@@ -205,6 +217,8 @@ def _action_priority(fact: dict[str, Any]) -> tuple[int, int, int]:
         priority = 99
     elif fact.get("_duplicate_risk"):
         priority = 5
+    elif fact.get("_emporio_priority") == "Alta":
+        priority = 8
     elif fact.get("_has_open_proposal"):
         priority = 10
     elif fact.get("_is_negotiation"):
@@ -221,7 +235,7 @@ def _action_priority(fact: dict[str, Any]) -> tuple[int, int, int]:
         priority = 70
     else:
         priority = 99
-    return (priority, -_int(fact.get("_score")), _int(fact.get("_lead_id")))
+    return (priority, -_int(fact.get("_emporio_score")), -_int(fact.get("_score")), _int(fact.get("_lead_id")))
 
 
 def _idempotency_key(action: dict[str, Any], reference_date: str) -> str:
@@ -243,11 +257,15 @@ def _idempotency_key(action: dict[str, Any], reference_date: str) -> str:
 
 
 def _weight_for_fact(fact: dict[str, Any]) -> str:
+    if fact.get("_emporio_priority") == "Alta":
+        return "Alta"
+    if fact.get("_emporio_priority") == "Média":
+        return "Média"
     if fact.get("_duplicate_risk") or fact.get("_has_open_proposal") or fact.get("_is_negotiation"):
-        return "Alto"
+        return "Alta"
     if fact.get("_pending_interactions_count") or fact.get("_has_next_followup") or fact.get("_is_high_opportunity"):
-        return "Médio"
-    return "Baixo"
+        return "Média"
+    return "Baixa"
 
 
 def _action_for_fact(fact: dict[str, Any], reference_date: str) -> dict[str, Any]:
@@ -268,18 +286,25 @@ def _action_for_fact(fact: dict[str, Any], reference_date: str) -> dict[str, Any
         state = "bloqueada por duplicidade"
     elif fact.get("_has_open_proposal"):
         action_type = "criar_retorno_pendente"
-        title = "Criar retorno pendente"
-        reason = "Proposta em aberto aguardando retorno."
+        title = "Retorno de proposta/cardápio"
+        reason = "Proposta/cardápio em aberto aguardando retorno."
         impact = "Aumenta a chance de conversão antes da proposta esfriar."
-        prepared_content = "Retornar contato sobre proposta em aberto."
-        suggested_message = f"Olá, {fact.get('name') or 'tudo bem'}? Passando para saber se ficou alguma dúvida sobre a proposta."
+        prepared_content = "Retornar contato sobre proposta/cardápio em aberto."
+        suggested_message = suggest_emporio_message(fact)
+    elif fact.get("_emporio_priority") == "Alta":
+        action_type = "acao_operacional_emporio_prioritaria"
+        title = str(fact.get("next_action") or "Executar próxima ação Empório")
+        reason = "; ".join(fact.get("_emporio_reasons") or ["Prioridade operacional Empório."])
+        impact = "Protege eventos, encomendas, reservas e oportunidades recorrentes com maior chance de conversão."
+        prepared_content = str(fact.get("next_action") or "Definir e executar retorno operacional do Empório.")
+        suggested_message = suggest_emporio_message(fact)
     elif fact.get("_is_negotiation"):
         action_type = "registrar_interacao_interna"
-        title = "Registrar interação interna"
+        title = "Atendimento corporativo"
         reason = "Contato em negociação aguardando condução."
         impact = "Ajuda a avançar uma negociação já qualificada."
-        prepared_content = "Registrar próximo passo da negociação."
-        suggested_message = f"Olá, {fact.get('name') or 'tudo bem'}? Podemos alinhar o próximo passo da negociação?"
+        prepared_content = "Registrar próximo passo do atendimento comercial."
+        suggested_message = suggest_emporio_message(fact)
     elif _int(fact.get("_pending_interactions_count")) > 0:
         action_type = "registrar_alerta_comercial_interno"
         title = "Registrar alerta comercial interno"
@@ -288,11 +313,11 @@ def _action_for_fact(fact: dict[str, Any], reference_date: str) -> dict[str, Any
         prepared_content = "Revisar interação pendente e registrar encaminhamento."
     elif fact.get("_has_next_followup"):
         action_type = "criar_retorno_pendente"
-        title = "Criar retorno pendente"
+        title = "Follow-up de encomenda"
         reason = "Retorno agendado no CRM."
         impact = "Cumpre o combinado com o contato e preserva cadência."
         prepared_content = "Registrar retorno comercial agendado."
-        suggested_message = f"Olá, {fact.get('name') or 'tudo bem'}? Estou retomando nosso contato conforme combinado."
+        suggested_message = suggest_emporio_message(fact)
     elif fact.get("_is_high_opportunity"):
         action_type = "registrar_sugestao_proxima_acao"
         reason = "Oportunidade em alta sem próxima ação."
@@ -304,7 +329,7 @@ def _action_for_fact(fact: dict[str, Any], reference_date: str) -> dict[str, Any
         reason = "Contato novo aguardando qualificação."
         impact = "Acelera a qualificação inicial e reduz contatos parados."
         prepared_content = "Preparar primeiro contato e próximos passos para revisão."
-        suggested_message = f"Olá, {fact.get('name') or 'tudo bem'}? Recebi seu contato e queria entender melhor sua necessidade."
+        suggested_message = suggest_emporio_message(fact)
     elif fact.get("_is_incomplete"):
         action_type = "cadastro_incompleto"
         title = "Sinalizar contato incompleto"
@@ -323,6 +348,9 @@ def _action_for_fact(fact: dict[str, Any], reference_date: str) -> dict[str, Any
         "prepared_content": prepared_content,
         "state": state,
         "status_context": fact.get("_stage"),
+        "emporio_priority": fact.get("_emporio_priority"),
+        "emporio_temperature": fact.get("_emporio_temperature"),
+        "opportunity_type": fact.get("_opportunity_type"),
         "title": title,
         "content": prepared_content,
         "suggested_message": suggested_message,
@@ -398,16 +426,22 @@ def build_operational_snapshot() -> dict[str, Any]:
     opportunities_high = sum(1 for fact in lead_facts if fact.get("_is_high_opportunity"))
     returns_todo = sum(1 for fact in lead_facts if fact.get("_needs_return"))
     contacts_without_next_action = sum(1 for fact in lead_facts if not fact.get("_is_closed") and not fact.get("_has_next_action"))
+    next_events = sum(1 for fact in lead_facts if fact.get("_days_until_event") is not None and 0 <= _int(fact.get("_days_until_event")) <= 14)
+    waiting_menu_return = sum(1 for fact in lead_facts if fact.get("_stage") in {"Proposta/cardápio enviado", "Aguardando retorno"})
+    open_estimated_value = sum(float(fact.get("estimated_value") or 0) for fact in lead_facts if not fact.get("_is_closed"))
 
     return {
         "total_contatos": len(leads),
         "oportunidades_em_alta": opportunities_high,
         "retornos_a_fazer": returns_todo,
         "propostas_em_aberto": sum(1 for fact in lead_facts if fact.get("_has_open_proposal")),
-        "contatos_novos": funnel["Novos contatos"],
-        "contatos_proposta_enviada": funnel["Proposta enviada"],
-        "contatos_em_negociacao": funnel["Em negociação"],
-        "contatos_fechados": funnel["Fechados"],
+        "contatos_novos": funnel["Novo contato"],
+        "contatos_proposta_enviada": funnel["Proposta/cardápio enviado"],
+        "contatos_em_negociacao": funnel["Aguardando retorno"],
+        "contatos_fechados": funnel["Confirmado / fechado"],
+        "eventos_entregas_proximos": next_events,
+        "propostas_cardapios_aguardando_retorno": waiting_menu_return,
+        "valor_estimado_em_aberto": open_estimated_value,
         "contatos_sem_proxima_acao": contacts_without_next_action,
         "contatos_incompletos": sum(1 for fact in lead_facts if fact.get("_is_incomplete")),
         "contatos_com_risco_duplicidade": len(duplicate_by_id),
@@ -417,9 +451,9 @@ def build_operational_snapshot() -> dict[str, Any]:
         "action_candidates": action_candidates,
         "funnel": funnel,
         "evidence": [
-            "Oportunidades em alta: contatos em negociação, com proposta em aberto ou pontuação alta.",
-            "Retornos: contatos com proposta aberta, interação pendente ou retorno agendado.",
-            "Propostas em aberto: propostas ainda não marcadas como ganhas, perdidas, fechadas ou canceladas.",
+            "Oportunidades em alta: eventos próximos, propostas/cardápios aguardando retorno, corporativos ou recorrentes.",
+            "Retornos: contatos com proposta/cardápio em aberto, interação pendente, retorno agendado ou próxima ação Empório.",
+            "Propostas em aberto: propostas/cardápios ainda não marcados como confirmados, perdidos ou cancelados.",
             "Duplicidade: mesmo telefone, WhatsApp, e-mail ou combinação de nome e cidade.",
         ],
     }
@@ -437,11 +471,13 @@ def _main_action(snapshot: dict[str, Any]) -> str:
     if _int(snapshot.get("contatos_com_risco_duplicidade")) > 0:
         return "Revisar duplicidades antes de liberar novas ações comerciais."
     if _int(snapshot.get("propostas_em_aberto")) > 0:
-        return "Retornar primeiro as propostas em aberto antes de iniciar novos contatos."
+        return "Retornar primeiro propostas/cardápios em aberto antes de iniciar novos contatos."
     if _int(snapshot.get("retornos_a_fazer")) > 0:
         return "Executar retornos pendentes antes de prospectar novos contatos."
+    if _int(snapshot.get("eventos_entregas_proximos")) > 0:
+        return "Priorizar eventos, entregas ou reservas próximos."
     if _int(snapshot.get("oportunidades_em_alta")) > 0:
-        return "Definir próxima ação para as oportunidades em alta."
+        return "Definir próxima ação para as oportunidades Empório em alta."
     return "Revisar a carteira e liberar apenas ações internas necessárias."
 
 
@@ -476,7 +512,7 @@ def prepare_ai_work_package(snapshot: dict[str, Any]) -> dict[str, Any]:
             alert
             for alert in [
                 f"{snapshot.get('contatos_com_risco_duplicidade')} contatos com risco de duplicidade." if _int(snapshot.get("contatos_com_risco_duplicidade")) else "",
-                f"{snapshot.get('propostas_em_aberto')} propostas em aberto precisam de retorno." if _int(snapshot.get("propostas_em_aberto")) else "",
+                f"{snapshot.get('propostas_cardapios_aguardando_retorno')} propostas/cardápios aguardam retorno." if _int(snapshot.get("propostas_cardapios_aguardando_retorno")) else "",
                 f"{snapshot.get('contatos_incompletos')} contatos incompletos precisam de revisão." if _int(snapshot.get("contatos_incompletos")) else "",
             ]
             if alert
@@ -536,8 +572,13 @@ def build_leads_operational_view() -> list[dict[str, Any]]:
                 "Contato": fact.get("name") or "Contato",
                 "Cidade/UF": fact.get("city") or "-",
                 "Segmento": fact.get("segment") or "-",
-                "Potencial IA": "Alto" if fact.get("_is_high_opportunity") else ("Médio" if fact.get("_is_new") else "Baixo"),
+                "Tipo de oportunidade": fact.get("_opportunity_type") or "-",
+                "Data evento/entrega": fact.get("event_or_delivery_date") or "-",
+                "Valor estimado": fact.get("estimated_value") or 0,
+                "Pessoas": fact.get("people_count") or 0,
+                "Potencial IA": fact.get("_emporio_priority") or ("Alta" if fact.get("_is_high_opportunity") else ("Média" if fact.get("_is_new") else "Baixa")),
                 "Status operacional": fact.get("_stage") or "Contato iniciado",
+                "Temperatura": fact.get("_emporio_temperature") or "-",
                 "Próxima ação sugerida": next_action.get("title"),
                 "Risco de duplicidade": fact.get("_duplicate_risk") or "Sem alerta",
                 "_lead_id": fact.get("_lead_id"),

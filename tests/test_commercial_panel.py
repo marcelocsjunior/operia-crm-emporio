@@ -82,8 +82,8 @@ def test_open_proposal_table_drives_card_funnel_and_opportunity(isolated_env):
     snap = build_commercial_panel_snapshot()
     assert snap["propostas_em_aberto"] == 1
     assert snap["contatos_proposta_enviada"] == 1
-    assert snap["funnel"]["Proposta enviada"] == 1
-    assert snap["funnel"]["Novos contatos"] == 0
+    assert snap["funnel"]["Proposta/cardápio enviado"] == 1
+    assert snap["funnel"]["Novo contato"] == 0
     assert snap["oportunidades_em_alta"] == 1
 
 
@@ -127,7 +127,7 @@ def test_ai_success_does_not_influence_deterministic_recommendation(isolated_env
 
     monkeypatch.setattr("operia_crm.services.commercial_panel.run_assisted_action", fake_run)
     pack = prepare_ai_commercial_actions(build_commercial_panel_snapshot())
-    assert pack["main_action"] == "Retornar primeiro as propostas em aberto antes de iniciar novos contatos."
+    assert pack["main_action"] == "Retornar primeiro propostas/cardápios em aberto antes de iniciar novos contatos."
     assert pack["prepared_actions"][0]["lead_id"] == lead_id
 
 
@@ -210,7 +210,7 @@ def test_package_actions_have_operational_fields(isolated_env):
     _make_lead("Cliente Operacional", "Negociação", score=80, phone="37999990000")
     pack = prepare_ai_commercial_actions(build_commercial_panel_snapshot())
     action = pack["prepared_actions"][0]
-    assert action["weight"] in {"Alto", "Médio", "Baixo"}
+    assert action["weight"] in {"Alta", "Média", "Baixa"}
     assert action["reason"]
     assert action["impact"]
     assert action["prepared_content"]
@@ -314,22 +314,25 @@ def test_premium_commercial_panel_keeps_human_review_contract():
     source = open("app.py", encoding="utf-8").read()
     required = [
         "OperIA CRM — Empório",
-        "Tela principal inteligente: a IA prioriza a carteira; o operador revisa antes de qualquer ação.",
-        "Top 5 automático",
-        "Temperatura comercial",
-        "Funil com gargalos",
+        "Modo operacional para restaurante: retornos, eventos, encomendas, reservas e atendimento corporativo com revisão humana.",
+        "Retornos de hoje",
+        "Eventos próximos",
+        "Proposta/cardápio",
         "IA com revisão",
-        "Fila ativa",
+        "Oportunidades abertas",
         "Oportunidades em alta",
-        "Retornos a fazer",
-        "Propostas em aberto",
+        "Retornos pendentes",
+        "Eventos/entregas próximos",
+        "Propostas/cardápios aguardando retorno",
+        "Valor estimado em aberto",
+        "Contatos parados",
         "Existem possíveis duplicidades. Revise antes de liberar novas ações comerciais.",
-        "IA prepara, operador libera",
-        "Tamanho do lote IA",
+        "O que o operador deve fazer agora",
+        "Tamanho do lote operacional",
         "Lead do lote",
         "#{lead_id} — {name} | {commercial_temperature(item)} | {title}",
-        "Mensagem WhatsApp sugerida",
-        "E-mail sugerido",
+        "Mensagem WhatsApp sugerida para o Empório",
+        "E-mail sugerido para o Empório",
         "WhatsApp revisado",
         "WhatsApp Web",
         "Gmail",
