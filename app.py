@@ -739,6 +739,13 @@ def unique_commercial_queue(actions: list[dict]) -> list[dict]:
     return unique_actions
 
 
+def clear_import_upload_state() -> None:
+    st.session_state.pop("import_workflow_package", None)
+    st.session_state["import_file_uploader_generation"] = safe_int(
+        st.session_state.get("import_file_uploader_generation")
+    ) + 1
+
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Painel Comercial",
     "Leads",
@@ -1005,7 +1012,9 @@ with tab3:
     st.write("Selecione um arquivo, analise o diagnóstico e confirme somente depois de revisar as linhas.")
 
     workflow_key = "import_workflow_package"
-    uploader_key = "import_file_uploader"
+    uploader_generation_key = "import_file_uploader_generation"
+    uploader_generation = safe_int(st.session_state.get(uploader_generation_key))
+    uploader_key = f"import_file_uploader_{uploader_generation}"
     import_mode = st.radio(
         "Escolha como deseja informar o arquivo",
         ["Selecionar no navegador", "Usar arquivo salvo no servidor"],
@@ -1067,13 +1076,15 @@ with tab3:
     with col_analyze:
         analyze_clicked = st.button("Analisar diagnóstico", disabled=package is None or bool(package.get("applied") if package else False))
     with col_clear:
-        clear_clicked = st.button("Limpar arquivo selecionado", disabled=package is None)
+        clear_clicked = st.button(
+            "Limpar arquivo selecionado",
+            disabled=package is None,
+            on_click=clear_import_upload_state,
+            key="import_clear_selected_file",
+        )
 
     if clear_clicked:
-        st.session_state.pop(workflow_key, None)
-        st.session_state.pop(uploader_key, None)
         st.info("Arquivo removido da sessão. Selecione um arquivo para iniciar uma nova análise.")
-        st.stop()
 
     if analyze_clicked and package is not None:
         if package.get("diagnostics") is None:
