@@ -132,19 +132,29 @@ def test_final_import_still_uses_import_deduped_leads_in_app():
     assert "import_deduped_leads(import_df" in app_source
 
 
-def test_import_uploader_uses_stable_key_and_explicit_clear():
+def test_import_uploader_keeps_identity_until_explicit_clear():
     app_source = Path("app.py").read_text()
     import_tab = app_source.split('with tab3:', 1)[1].split('with tab4:', 1)[0]
 
-    assert 'uploader_key = "import_file_uploader"' in import_tab
+    assert 'uploader_generation_key = "import_file_uploader_generation"' in import_tab
+    assert 'uploader_generation = safe_int(st.session_state.get(uploader_generation_key))' in import_tab
+    assert 'uploader_key = f"import_file_uploader_{uploader_generation}"' in import_tab
     assert 'key=uploader_key' in import_tab
     assert '"Selecionar no navegador"' in import_tab
     assert '"Usar arquivo salvo no servidor"' in import_tab
-    assert 'import_workflow_uploader_version' not in import_tab
-    assert 'key=f"import_file_uploader_' not in import_tab
     assert '"Selecionar arquivo CSV ou XLSX"' in import_tab
     assert '"Limpar arquivo selecionado"' in import_tab
-    assert 'st.session_state.pop(uploader_key, None)' in import_tab
+    assert 'on_click=clear_import_upload_state' in import_tab
+
+
+def test_import_clear_does_not_mutate_rendered_uploader_widget_state():
+    app_source = Path("app.py").read_text()
+    import_tab = app_source.split('with tab3:', 1)[1].split('with tab4:', 1)[0]
+
+    assert 'st.session_state.pop(uploader_key, None)' not in import_tab
+    assert 'st.stop()' not in import_tab
+    assert 'st.session_state.pop("import_workflow_package", None)' in app_source
+    assert 'st.session_state["import_file_uploader_generation"] = safe_int(' in app_source
 
 
 def test_import_selection_message_and_diagnostic_guard():
